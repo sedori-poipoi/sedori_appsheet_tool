@@ -1,0 +1,4 @@
+node_modules/
+.DS_Store
+*.log
+sedori_appsheet_tool_backup/
