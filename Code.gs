@@ -1,8 +1,8 @@
 /**
- * sedori_appsheet_tool (プロ仕様リサーチツール v2.2)
+ * sedori_appsheet_tool (プロ仕様リサーチツール v3.0 - 動的カラムマッピング対応版)
  * 
  * AppSheet × GAS × Keepa API 連携
- * JANコードからKeepa APIを呼び出し、正規JANを除いた全32項目を取得・出力
+ * シートごとの異なるカラム配置をヘッダーから自動検知して処理します。
  */
 
 // ==========================================
@@ -10,7 +10,17 @@
 // ==========================================
 
 const KEEPA_API_KEY = 'psr7fkj9soadqmmqptf70e34bs6t317ujjptvul3vfi5i5hvcmrst4p8hf22aqmb';
-const TARGET_SHEET_NAME = "リサーチリスト";
+
+// 処理対象となるシート名のリスト（これ以外のシートで編集されても発火しない）
+const TARGET_SHEET_NAMES = [
+  "リサーチリスト", 
+  "プレ値リスト", 
+  "Keepa指名手配リスト", 
+  "ニッチ指名手配リスト", 
+  "ASIN指名手配リスト",
+  "ターゲットリスト",
+  "cosme_価格チェック_0224"
+];
 
 // APIキー群 (スクリプトプロパティから取得)
 function getApiTokens() {
@@ -30,42 +40,73 @@ const WANTED_LIST_TARGETS = [
   { sheetName: 'cosme_価格チェック_0224', flag: '💄 発見(cosme)' }
 ];
 
-// 列番号の設定
-const COL_JAN_INPUT    = 2;   // B: JAN
-const COL_TITLE        = 3;   // C: 商品名
-const COL_ASIN         = 4;   // D: ASIN
-const COL_BRAND        = 5;   // E: ブランド
-const COL_RANK         = 6;   // F: 売れ筋ランキング
-const COL_MONTHLY_SOLD = 7;   // G: 先月購入数
-const COL_CATEGORY     = 8;   // H: カテゴリー
-const COL_SELLER_COUNT = 9;   // I: セラー数
-const COL_VARIATION    = 10;  // J: バリエーション
-const COL_BUYBOX       = 11;  // K: カート価格
-const COL_NEW_PRICE    = 12;  // L: 新品現在価格
-const COL_FBA_LOWEST   = 13;  // M: FBA最安値
-const COL_PURCHASE     = 14;  // N: 仕入価格
-const COL_PROFIT       = 15;  // O: 粗利益
-const COL_BREAK_EVEN   = 16;  // P: 損益分岐(仕入上限)
-const COL_PROFIT_RATE  = 17;  // Q: 利益率
-const COL_ROI          = 18;  // R: ROI
-const COL_JUDGMENT     = 19;  // S: 仕入判定
-const COL_FBA_FEE      = 20;  // T: FBA手数料
-const COL_REF_RATE     = 21;  // U: 紹介料率
-const COL_SIZE_WEIGHT  = 22;  // V: 重量・サイズ
-const COL_HAZMAT       = 23;  // W: 危険物
-const COL_LINK_AMAZON  = 24;  // X: Amazonリンク
-const COL_LINK_KEEPA   = 25;  // Y: Keepaリンク
-const COL_LINK_POI     = 26;  // Z: sedori_poipoi
-const COL_IMAGE        = 27;  // AA: 画像URL
-const COL_AMAZON_SELL  = 28;  // AB: Amazon本体有無
-const COL_RESTRICTION  = 29;  // AC: 出品制限フラグ
-const COL_DROPS_30     = 30;  // AD: 下落回数(30日)
-const COL_SHIPPING     = 31;  // AE: 納品送料概算
-const COL_RESEARCH_DT  = 32;  // AF: リサーチ日時
-const COL_SKU          = 36;  // AJ: SKU
-const COL_WANTED_FLAG  = 37;  // AK: 手配書フラグ
+// ==========================================
+// 動的カラムマッピング (全シート対応)
+// ==========================================
 
-const DATA_COL_COUNT = COL_RESEARCH_DT - COL_TITLE + 1;
+const COL_ALIASES = {
+  JAN: ['JAN', 'JANコード', 'jan'],
+  TITLE: ['商品名', 'タイトル'],
+  ASIN: ['ASIN', 'asin'],
+  BRAND: ['ブランド'],
+  RANK: ['売れ筋ランキング', 'ランキング'],
+  MONTHLY_SOLD: ['先月購入数', '月間販売数'],
+  CATEGORY: ['カテゴリー', 'ランキングカテゴリ'],
+  SELLER_COUNT: ['セラー数'],
+  VARIATION: ['バリエーション', 'バリエーション数'],
+  BUYBOX: ['カート価格', 'カート価格(基準)'],
+  NEW_PRICE: ['新品現在価格'],
+  FBA_LOWEST: ['FBA最安値'],
+  PURCHASE: ['仕入価格', '仕入価格(入力用)'],
+  PROFIT: ['粗利益'],
+  LIST_PRICE: ['定価/通常価格', '定価'],
+  PREMIUM_JUDGE: ['プレ値判定', 'プレ値'],
+  JUDGMENT: ['仕入判定', '判定(自動計算)', '判定'],
+  FBA_FEE: ['FBA手数料'],
+  REF_RATE: ['紹介料率'],
+  SIZE_WEIGHT: ['重量・サイズ', 'サイズ・重量'],
+  HAZMAT: ['危険物'],
+  LINK_AMAZON: ['Amazonリンク'],
+  LINK_KEEPA: ['Keepaリンク'],
+  LINK_POI: ['sedori_poipoi', 'sedori_poipoiリンク'],
+  IMAGE: ['画像URL'],
+  AMAZON_SELL: ['Amazon本体有無', 'Amazon本体'],
+  RESTRICTION: ['出品制限フラグ'],
+  DROPS_30: ['下落回数(30日)', '下落回数'],
+  SHIPPING: ['納品送料概算', '納品送料'],
+  RESEARCH_DT: ['リサーチ日時', '取得日時'],
+  PURCHASED: ['仕入済'],
+  SHIP_METHOD: ['発送方法'],
+  TRANSFERRED: ['転送済フラグ'],
+  SKU: ['SKU'],
+  WANTED_FLAG: ['手配書フラグ'],
+  QTY: ['仕入個数'],
+  SHOP: ['店舗', '仕入店舗', 'ショップ名', '店名']
+};
+
+/**
+ * シートの1行目を読み取り、キー名と列番号(1-based)のペアを返す
+ */
+function getColMap(sheet) {
+  const lastCol = sheet.getLastColumn();
+  if (lastCol < 1) return { colMap: {}, lastCol: 0, headers: [] };
+  
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  const colMap = {};
+  
+  headers.forEach((header, index) => {
+    if (!header) return;
+    const hStr = String(header).trim();
+    for (const [key, aliases] of Object.entries(COL_ALIASES)) {
+      // 既にマッチ済みならスキップしない（重複がある場合は最初に見つかったものを優先したいが、後の列で上書きされる。とりあえずそのまま）
+      if (!colMap[key] && aliases.includes(hStr)) {
+        colMap[key] = index + 1; // 1-based index
+      }
+    }
+  });
+  
+  return { colMap, lastCol, headers };
+}
 
 // ==========================================
 // 入力判定ヘルパー
@@ -88,15 +129,13 @@ function getWantedJanMap() {
   WANTED_LIST_TARGETS.forEach(t => {
     const sheet = ss.getSheetByName(t.sheetName);
     if (!sheet) return;
+    const { colMap } = getColMap(sheet);
+    if (!colMap.JAN) return; // JAN列がないシートはスキップ
+    
     const lastRow = sheet.getLastRow();
     if (lastRow < 2) return;
     
-    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-    const colJanIdx = headers.findIndex(h => String(h).toUpperCase() === 'JAN');
-    if (colJanIdx === -1) return;
-    const colJan = colJanIdx + 1;
-    
-    const values = sheet.getRange(2, colJan, lastRow - 1, 1).getValues();
+    const values = sheet.getRange(2, colMap.JAN, lastRow - 1, 1).getValues();
     values.forEach((row, r) => {
       const jan = String(row[0]).trim();
       if (jan && jan !== "") {
@@ -136,43 +175,131 @@ function markWantedListAsArrested(ss, matches) {
 
 function onChange(e) {
   console.log("🌸 onChange トリガー発火 (AppSheet連携)");
-  // AppSheet側の同期書き込み処理が完全に終わるのを待つ（競合での上書き防止）
   Utilities.sleep(3000);
-  autoResearch(null);
+  autoResearch(null); // 以降でアクティブシートを判別
 }
 
 function onEdit(e) {
   if (!e || !e.range) return;
   const sheet = e.range.getSheet();
-  if (sheet.getName() !== TARGET_SHEET_NAME) return;
+  if (!TARGET_SHEET_NAMES.includes(sheet.getName())) return;
 
   const row = e.range.getRow();
   if (row < 2) return; // ヘッダーは除外
 
+  const { colMap } = getColMap(sheet);
+  if (!colMap.JAN) return; // JAN列がないシートは無視
+
+  const colPurchased = colMap.PURCHASED;
+  const colTransferred = colMap.TRANSFERRED;
+  const editedCol = e.range.getColumn();
+
+  if (colPurchased && editedCol === colPurchased) {
+    const isPurchased = sheet.getRange(row, colPurchased).getValue() === true;
+    const isTransferred = colTransferred ? sheet.getRange(row, colTransferred).getValue() === true : false;
+
+    if (isPurchased && !isTransferred) {
+      transferToPurchaseData(sheet, row, colMap);
+      if (colTransferred) sheet.getRange(row, colTransferred).setValue(true);
+    }
+  } else if (editedCol === colMap.PURCHASE || editedCol === colMap.QTY || editedCol === colMap.BUYBOX || editedCol === colMap.FBA_FEE) {
+    // 💡 仕入価格、個数、またはカート価格等が変更された場合は再計算
+    recalculateRow(sheet, row, colMap);
+  } else {
+    autoResearch(e);
+  }
+}
+
+/**
+ * 指定した行の利益・ROI・判定を動的カラムマップに基づいて再計算する（Keepa通信なし）
+ */
+function recalculateRow(sheet, row, colMap) {
+  if (!colMap) colMap = getColMap(sheet).colMap;
   const lastCol = sheet.getLastColumn();
   if (lastCol < 1) return;
 
-  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
-  const colPurchased = headers.indexOf('仕入済') + 1;
-  const colTransferred = headers.indexOf('転送済フラグ') + 1;
+  const range = sheet.getRange(row, 1, 1, lastCol);
+  const values = range.getValues()[0];
 
-  if (colPurchased === 0 || colTransferred === 0) {
-    autoResearch(e);
-    return;
+  // 🧮 数値のクリーンアップ（¥やカンマ、スペースを除去）
+  const parseNum = (val) => {
+    if (typeof val === 'number') return val;
+    if (!val) return 0;
+    const clean = String(val).replace(/[¥, ]/g, '');
+    return Number(clean) || 0;
+  };
+
+  const getNum = (colKey) => colMap[colKey] ? parseNum(values[colMap[colKey] - 1]) : 0;
+  const getVal = (colKey) => colMap[colKey] ? values[colMap[colKey] - 1] : "";
+
+  const buyBox = getNum('BUYBOX');
+  const fbaFee = getNum('FBA_FEE');
+  const refRate = getNum('REF_RATE');
+  const purchasePrice = getNum('PURCHASE');
+  
+  let qty = getNum('QTY');
+  if (qty === 0 && colMap.QTY) {
+      qty = 1;
+  } else if (!colMap.QTY) {
+      qty = 1;
   }
 
-  const editedCol = e.range.getColumn();
+  const fbaLowest = getNum('FBA_LOWEST');
+  const monthlySold = getNum('MONTHLY_SOLD');
+  const sellerCount = getNum('SELLER_COUNT');
 
-  if (editedCol === colPurchased) {
-    const isPurchased = sheet.getRange(row, colPurchased).getValue() === true;
-    const isTransferred = sheet.getRange(row, colTransferred).getValue() === true;
+  if (buyBox > 0) {
+    const rate = refRate > 0 ? (refRate / 100) : 0.15; // 紹介料率のデフォルト15%
+    const breakEven = Math.floor(buyBox - fbaFee - (buyBox * rate));
+    const profitPerUnit = breakEven - purchasePrice;
+    const totalProfit = profitPerUnit * qty;
+    const profitRateValue = profitPerUnit / buyBox; // 利益率（少数点）
+    const roi = purchasePrice > 0 ? Math.round((profitPerUnit / purchasePrice) * 100) : 0;
 
-    if (isPurchased && !isTransferred) {
-      transferToPurchaseData(sheet, row);
-      sheet.getRange(row, colTransferred).setValue(true);
+    // プレ値判定の更新
+    let premiumLabel = "ー";
+    const listPrice = getNum('LIST_PRICE');
+    if (listPrice > 0 && buyBox > 0) {
+      const ratio = ((buyBox - listPrice) / listPrice) * 100;
+      if (ratio >= 30) premiumLabel = `🔥 +${Math.round(ratio)}%`;
+      else if (ratio >= 20) premiumLabel = `🔸 +${Math.round(ratio)}%`;
+      else if (ratio < -10) premiumLabel = `📉 ${Math.round(ratio)}%`;
     }
-  } else {
-    autoResearch(e);
+
+    // 判定ロジック（なぎさんのAppSheet数式と100%同期）
+    let judgment = "✖️ 見送り";
+
+    if (buyBox < 2000 && buyBox > 0 && profitPerUnit >= 100 && profitRateValue >= 0.10 && monthlySold >= 10) {
+      judgment = "○ 仕入れ対象";
+    } else if (profitPerUnit >= 500 && monthlySold >= 30 && sellerCount <= 5) {
+      judgment = "◎ 超即買い";
+    } else if (profitPerUnit >= 300 && monthlySold >= 10) {
+      judgment = "○ 仕入れ対象";
+    } else if (profitPerUnit >= 1000 && monthlySold <= 3) {
+      judgment = "△ 要確認";
+    }
+    
+    // 手配書マッチがある場合は優先的に表示
+    const wantedFlag = getVal('WANTED_FLAG');
+    if (wantedFlag && wantedFlag !== "") judgment = `🚓 ${judgment}`;
+
+    // 反映
+    if (colMap.BREAK_EVEN) sheet.getRange(row, colMap.BREAK_EVEN).setValue(breakEven);
+    if (colMap.PROFIT) sheet.getRange(row, colMap.PROFIT).setValue(totalProfit);
+    if (colMap.PROFIT_RATE) sheet.getRange(row, colMap.PROFIT_RATE).setValue(Math.round(profitRateValue * 100) + "%");
+    if (colMap.ROI) sheet.getRange(row, colMap.ROI).setValue(roi + "%");
+    if (colMap.PREMIUM_JUDGE) sheet.getRange(row, colMap.PREMIUM_JUDGE).setValue(premiumLabel);
+    if (colMap.JUDGMENT) sheet.getRange(row, colMap.JUDGMENT).setValue(judgment);
+
+    // SKUも更新（仕入価格や損益分岐点が変わるため）
+    const asin = getVal('ASIN');
+    if (asin && colMap.SKU) {
+      const dateIdPart = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyyMMdd");
+      const sku = `${purchasePrice}_${dateIdPart}_${breakEven}_${asin}`;
+      sheet.getRange(row, colMap.SKU).setValue(sku);
+    }
+    
+    console.log(`🔄 再計算完了 (行:${row}): ${judgment} / 利益 ${totalProfit}円`);
   }
 }
 
@@ -187,54 +314,84 @@ function testRun() {
 function autoResearch(e) {
   console.log("🌸 autoResearch 開始...");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(TARGET_SHEET_NAME);
-  if (!sheet) return;
+  let sheet;
+  if (e && e.range) {
+      sheet = e.range.getSheet(); // トリガー実行シートを優先
+  } else {
+      sheet = ss.getActiveSheet(); // 手動実行時はアクティブシート
+  }
+  
+  if (!TARGET_SHEET_NAMES.includes(sheet.getName())) {
+      sheet = ss.getSheetByName("リサーチリスト"); // デフォルトフォールバック
+      if (!sheet) return;
+  }
+
+  const { colMap, lastCol } = getColMap(sheet);
+  if (!colMap.JAN) return; // JAN列がないと計算不可
 
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return;
 
-  const lastCol = sheet.getLastColumn();
-  if (lastCol < COL_JAN_INPUT) return;
-
-  const fullRange = sheet.getRange(1, COL_JAN_INPUT, lastRow, DATA_COL_COUNT + 1);
+  const fullRange = sheet.getRange(1, 1, lastRow, lastCol);
   const allValues = fullRange.getValues();
 
   const cacheMap = new Map();
   // 1. すでにタイトルが入っている行のデータをローカルキャッシュに蓄積
   for (let r = 1; r < allValues.length; r++) {
-    const input = String(allValues[r][0]).trim();
-    const title = allValues[r][1];
+    const input = String(allValues[r][colMap.JAN - 1]).trim();
+    const title = colMap.TITLE ? String(allValues[r][colMap.TITLE - 1]) : "";
     if (input && input !== "" && title && title !== "" && !title.startsWith("[Error") && title !== "見つかりませんでした") {
-      const rowData = allValues[r].slice(1, DATA_COL_COUNT + 1);
-      cacheMap.set(input, rowData);
+      cacheMap.set(input, allValues[r]);
     }
   }
 
   // グローバル変数に依存せず、1回だけ手配書リストを取得する
   const wantedMap = getWantedJanMap();
 
-  // 2. タイトルが空でJANのみ入力されている行に対して処理を行う
+  // 2. データの取得と再計算
   for (let i = 1; i < allValues.length; i++) {
     const currentRow = i + 1;
-    const input = String(allValues[i][0]).trim();
-    const title = allValues[i][1];
+    const input = String(allValues[i][colMap.JAN - 1]).trim();
+    const title = colMap.TITLE ? String(allValues[i][colMap.TITLE - 1]) : "";
+    const sizeWeight = colMap.SIZE_WEIGHT ? String(allValues[i][colMap.SIZE_WEIGHT - 1]) : "";
+    const refRate = colMap.REF_RATE ? allValues[i][colMap.REF_RATE - 1] : "";
 
-    if (input && input !== "" && (!title || title === "")) {
-      if (cacheMap.has(input)) {
+    if (!input || input === "") continue;
+
+    // 🔎 タイトルがない、または既存データに異常（nanが含まれる、紹介料が空など）がある場合はリサーチを実行
+    const isBroken = title.startsWith("[Error]") || title === "見つかりませんでした" || sizeWeight.includes("nan") || (title !== "" && refRate === "");
+    
+    if (!title || title === "" || isBroken) {
+      // 🔎 新規リサーチまたは不備データの修復
+      if (cacheMap.has(input) && !isBroken) {
         console.log(`🌸 キャッシュヒット: ${input} -> 行: ${currentRow} に書き込みます`);
         const cachedData = cacheMap.get(input);
-        sheet.getRange(currentRow, COL_TITLE, 1, DATA_COL_COUNT).setValues([cachedData]);
-        SpreadsheetApp.flush(); // 即時反映して競合を防ぐ
+        const targetValues = [...allValues[i]]; // 現在の行
         
+        for (const [key, colIdx] of Object.entries(colMap)) {
+            // ユーザー入力済みの情報や、すでに正しく入っている可能性のある列を保護
+            if (['JAN', 'PURCHASE', 'QTY', 'PURCHASED', 'TRANSFERRED'].includes(key)) continue;
+            targetValues[colIdx - 1] = cachedData[colIdx - 1];
+        }
+        
+        sheet.getRange(currentRow, 1, 1, lastCol).setValues([targetValues]);
+        SpreadsheetApp.flush();
         const matches = wantedMap.get(input) || [];
         if (matches.length > 0) markWantedListAsArrested(ss, matches);
-        continue;
+        
+        recalculateRow(sheet, currentRow, colMap);
+      } else {
+        const canContinue = fetchProductData(input, currentRow, sheet, ss, wantedMap, colMap);
+        if (canContinue === false) break;
+        Utilities.sleep(1000); // 連続通信を避ける
       }
-      
-      const canContinue = fetchProductData(input, currentRow, sheet, ss, wantedMap);
-      if (canContinue === false) break;
-      Utilities.sleep(1000);
+    } else {
+      // 🔄 既存行の再計算（直近の100件程度に限定して高速化）
+      if (i > allValues.length - 150) {
+        recalculateRow(sheet, currentRow, colMap);
+      }
     }
+    Utilities.sleep(100); // 負荷軽減
   }
 }
 
@@ -242,7 +399,7 @@ function autoResearch(e) {
 // データ取得・書き込みロジック
 // ==========================================
 
-function fetchProductData(barcode, row, sheet, ss, wantedMap) {
+function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
   try {
     let product = getFromKvCache(barcode);
     let usedCache = !!product;
@@ -255,8 +412,8 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap) {
       const json = JSON.parse(response.getContentText());
 
       if (json.error || !json.products || json.products.length === 0) {
-        if (json.error) setError(sheet, row, `API Error: ${json.error.message}`);
-        else setNotFound(sheet, row);
+        if (json.error) setError(sheet, row, colMap, `API Error: ${json.error.message}`);
+        else setNotFound(sheet, row, colMap);
         return true;
       }
       product = json.products[0];
@@ -276,25 +433,60 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap) {
     const stats = product.stats || {};
     const current = stats.current || [];
     const rank = current[3] || "";
-    let newPrice = current[1] || current[0] || "";
-    let buyBox = current[18] || stats.buyBoxPrice || newPrice;
-    let fbaLowest = current[7] || "";
-    let sellerCount = current[11] || "";
+    let newPrice = (current[1] > 0 ? current[1] : (current[0] > 0 ? current[0] : ""));
+    
+    // カート価格 (buyBoxPrice や current[18] が -1 や -2 の場合は除外する)
+    let buyBoxCandidate = current[18] > 0 ? current[18] : (stats.buyBoxPrice > 0 ? stats.buyBoxPrice : "");
+    let buyBox = buyBoxCandidate || newPrice; // カート価格がない場合は新品価格を採用
+
+    let fbaLowest = current[7] > 0 ? current[7] : "";
+    let sellerCount = current[11] >= 0 ? current[11] : "";
     const isVariation = (product.variationCSV && product.variationCSV.length > 0) ? "有" : "無";
     const isAmazonSelling = (current[0] && current[0] > 0) ? "有" : "無";
     let monthlySold = product.monthlySold !== undefined ? product.monthlySold : stats.salesRankDrops30 || "";
-    let drops30 = stats.salesRankDrops30 || "";
+    let drops30 = stats.salesRankDrops30 >= 0 ? stats.salesRankDrops30 : "";
     let fbaFee = (product.fbaFees && product.fbaFees.pickAndPackFee) ? product.fbaFees.pickAndPackFee : "";
+    
+    // 定価の取得
+    let listPrice = (stats.listPrice > 0) ? stats.listPrice : (stats.suggestedPrice > 0 ? stats.suggestedPrice : 0);
+    
+    // 紹介料率の取得（小数点以下も保持）
     let refRate = product.referralFeePercent || "";
+    if (refRate === "" && product.fbaFees && product.fbaFees.referralFeePercent !== undefined) {
+        refRate = product.fbaFees.referralFeePercent;
+    }
 
     let breakEven = "";
     if (buyBox && buyBox > 0 && fbaFee) {
-      const rate = refRate ? (parseFloat(refRate) / 100) : 0.15;
+      const rate = refRate !== "" ? (parseFloat(refRate) / 100) : 0.15; // デフォルト15%
       breakEven = Math.floor(buyBox - fbaFee - (buyBox * rate));
     }
 
+    // プレ値判定
+    let premiumJudge = "ー";
+    if (listPrice > 0 && buyBox > 0) {
+      const ratio = ((buyBox - listPrice) / listPrice) * 100;
+      if (ratio >= 30) premiumJudge = `🔥 +${Math.round(ratio)}%`;
+      else if (ratio >= 20) premiumJudge = `🔸 +${Math.round(ratio)}%`;
+      else if (ratio < -10) premiumJudge = `📉 ${Math.round(ratio)}%`;
+    }
+
+    // サイズ・重量のフォーマット（cm、g表記。Keepaエクスポートに合わせる）
     let sizeWeight = "";
-    if (product.packageLength > 0) sizeWeight = `${product.packageLength}x${product.packageWidth}x${product.packageHeight}mm ${product.packageWeight}g`;
+    const pL = product.packageLength || product.itemLength || 0;
+    const pW = product.packageWidth || product.itemWidth || 0;
+    const pH = product.packageHeight || product.itemHeight || 0;
+    const pWeight = product.packageWeight || product.itemWeight || 0;
+
+    if (pL > 0) {
+      // APIの mm を cm に変換
+      const cmL = (pL / 10).toFixed(1);
+      const cmW = (pW / 10).toFixed(1);
+      const cmH = (pH / 10).toFixed(1);
+      sizeWeight = `${cmL}x${cmW}x${cmH}cm ${pWeight}g`;
+    } else if (pWeight > 0) {
+      sizeWeight = `${pWeight}g`;
+    }
 
     let isHazmat = product.hazardousMaterialType ? "Yes" : "No";
     if (title.toLowerCase().includes("battery") || title.includes("電池")) isHazmat = "Yes";
@@ -306,25 +498,78 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap) {
 
     const matches = wantedMap.get(String(barcode).trim()) || [];
     const judgmentFlag = getJudgmentFlagString(matches);
-    const existingPurchasePrice = sheet.getRange(row, COL_PURCHASE).getValue() || "";
-    const sku = `${existingPurchasePrice || 0}_${Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyyMMdd")}_${breakEven || 0}_${asin}`;
+    
+    // 現在の行データを取得し、必要な列だけを安全に上書き
+    const currentValues = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const outRow = [...currentValues]; 
 
-    const values = [[
-      title, asin, brand, rank, monthlySold, categoryName, sellerCount, isVariation,
-      buyBox, newPrice, fbaLowest, existingPurchasePrice, "", breakEven, "", "", "",
-      fbaFee, refRate, sizeWeight, isHazmat, amazonLink, keepaLink, poiLink, imageUrl,
-      isAmazonSelling, "", drops30, "", now
-    ]];
+    const setCol = (colKey, val) => {
+        if (colMap[colKey]) outRow[colMap[colKey] - 1] = val;
+    };
 
-    sheet.getRange(row, COL_TITLE, 1, values[0].length).setValues(values);
-    sheet.getRange(row, COL_SKU).setValue(sku);
-    sheet.getRange(row, COL_WANTED_FLAG).setValue(judgmentFlag);
+    setCol('TITLE', title);
+    setCol('ASIN', asin);
+    setCol('BRAND', brand);
+    setCol('RANK', rank);
+    setCol('MONTHLY_SOLD', monthlySold);
+    setCol('CATEGORY', categoryName);
+    setCol('SELLER_COUNT', sellerCount);
+    setCol('VARIATION', isVariation);
+    setCol('BUYBOX', buyBox);
+    setCol('NEW_PRICE', newPrice);
+    setCol('FBA_LOWEST', fbaLowest);
+    setCol('LIST_PRICE', listPrice);
+    setCol('PREMIUM_JUDGE', premiumJudge);
+    setCol('BREAK_EVEN', breakEven);
+    setCol('FBA_FEE', fbaFee);
+    setCol('REF_RATE', refRate);
+    setCol('SIZE_WEIGHT', sizeWeight);
+    setCol('HAZMAT', isHazmat);
+    setCol('LINK_AMAZON', amazonLink);
+    setCol('LINK_KEEPA', keepaLink);
+    setCol('LINK_POI', poiLink);
+    setCol('IMAGE', imageUrl);
+    setCol('AMAZON_SELL', isAmazonSelling);
+    setCol('DROPS_30', drops30);
+    setCol('RESEARCH_DT', now);
+    setCol('WANTED_FLAG', judgmentFlag);
+    
+    // 店舗名（既存の値があれば保持、なければ空。ポイポイからの書き込み等で拡張可能）
+    const existingShop = colMap.SHOP ? (currentValues[colMap.SHOP - 1] || "") : "";
+    setCol('SHOP', existingShop);
+
+    const existingPurchasePrice = colMap.PURCHASE ? (currentValues[colMap.PURCHASE - 1] || "") : "";
+
+    sheet.getRange(row, 1, 1, outRow.length).setValues([outRow]);
+    
+    // 💡 最後に利益・ROI・判定・SKUを一括計算して上書き
+    recalculateRow(sheet, row, colMap);
     SpreadsheetApp.flush(); // 即時反映して競合を防ぐ
 
     if (matches.length > 0 && ss) markWantedListAsArrested(ss, matches);
+
+    // 🔔 LINE リッチ通知（利益300円以上 or 手配書マッチ時）
+    const MIN_PROFIT_FOR_ALERT = 300;
+    const numBreakEven = Number(breakEven) || 0;
+    const numPurchase = Number(existingPurchasePrice) || 0;
+    const profit = numPurchase > 0 ? (numBreakEven - numPurchase) : numBreakEven;
+    if (profit >= MIN_PROFIT_FOR_ALERT || matches.length > 0) {
+      try {
+        sendLineFlexNotification({
+          title, imageUrl, asin, buyBox, rank, breakEven,
+          sellerCount, monthlySold, isVariation, isHazmat,
+          isAmazonSelling, amazonLink, keepaLink, judgmentFlag, profit,
+          purchasePrice: existingPurchasePrice
+        });
+        console.log(`📱 LINE通知送信: ${title} (利益: ¥${profit})`);
+      } catch (lineErr) {
+        console.warn(`LINE通知エラー（処理は継続）: ${lineErr}`);
+      }
+    }
+
     console.log(`🌸 API リサーチ完了: ${title} -> 行: ${row} に書き込みました`);
     return true;
-  } catch (e) { setError(sheet, row, e.toString()); return true; }
+  } catch (e) { setError(sheet, row, colMap, e.toString()); return true; }
 }
 
 // ==========================================
@@ -374,8 +619,181 @@ function sendLineNotification(message) {
   try { UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', options); } catch(e) {}
 }
 
-function setNotFound(sheet, row) { sheet.getRange(row, COL_TITLE).setValue("見つかりませんでした"); }
-function setError(sheet, row, message) { sheet.getRange(row, COL_TITLE).setValue(`[Error] ${message}`); }
+// ==========================================
+// LINE Flex Message リッチ通知 🔔
+// ==========================================
+
+function sendLineFlexNotification(data) {
+  const props = PropertiesService.getScriptProperties();
+  const accessToken = props.getProperty('MERUPOI_LINE_ACCESS_TOKEN') || '';
+  const userId = props.getProperty('MERUPOI_LINE_USER_ID') || '';
+  if (!accessToken || !userId) return;
+
+  const {
+    title, imageUrl, asin, buyBox, rank, breakEven,
+    sellerCount, monthlySold, isVariation, isHazmat,
+    isAmazonSelling, amazonLink, keepaLink, judgmentFlag, profit,
+    purchasePrice
+  } = data;
+
+  // メルカリ検索用: 商品名の先頭40文字をURLエンコード
+  const mercariQuery = encodeURIComponent((title || "").substring(0, 40));
+  const mercariLink = `https://jp.mercari.com/search?keyword=${mercariQuery}`;
+
+  // ヘッダーの色（手配書マッチ=赤、通常=緑）
+  const headerColor = judgmentFlag ? "#DC3545" : "#28A745";
+  const headerText = judgmentFlag ? `🚨 手配書マッチ！ ${judgmentFlag}` : "🔥 利益商品を発見！";
+
+  // 危険物・Amazon本体の警告色
+  const hazmatColor = isHazmat === "Yes" ? "#DC3545" : "#888888";
+  const amazonSellColor = isAmazonSelling === "有" ? "#DC3545" : "#28A745";
+
+  const flexMessage = {
+    "type": "flex",
+    "altText": `${headerText} ${(title || "").substring(0, 20)}... ¥${profit}`,
+    "contents": {
+      "type": "bubble",
+      "size": "giga",
+      "header": {
+        "type": "box",
+        "layout": "vertical",
+        "contents": [{
+          "type": "text",
+          "text": headerText,
+          "color": "#FFFFFF",
+          "weight": "bold",
+          "size": "md"
+        }],
+        "backgroundColor": headerColor,
+        "paddingAll": "12px"
+      },
+      "hero": imageUrl ? {
+        "type": "image",
+        "url": imageUrl,
+        "size": "full",
+        "aspectRatio": "1:1",
+        "aspectMode": "fit",
+        "backgroundColor": "#FFFFFF"
+      } : undefined,
+      "body": {
+        "type": "box",
+        "layout": "vertical",
+        "spacing": "md",
+        "contents": [
+          {
+            "type": "text",
+            "text": `📦 ${title || "Unknown"}`,
+            "weight": "bold",
+            "size": "sm",
+            "wrap": true,
+            "maxLines": 2
+          },
+          {
+            "type": "separator"
+          },
+          {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "contents": [
+              makeInfoRow("💰 カート価格", `¥${Number(buyBox || 0).toLocaleString()}`),
+              makeInfoRow("📊 ランキング", `${Number(rank || 0).toLocaleString()}位`),
+              makeInfoRow("🏷️ 仕入上限", `¥${Number(breakEven || 0).toLocaleString()}`),
+              makeInfoRow("🛒 仕入価格", purchasePrice ? `¥${Number(purchasePrice).toLocaleString()}` : "-"),
+              makeInfoRow("💵 見込利益", `¥${Number(profit || 0).toLocaleString()}`),
+              makeInfoRow("👥 セラー数", `${sellerCount || "-"}人`),
+              makeInfoRow("📈 月間販売", `${monthlySold || "-"}個`),
+              makeInfoRow("🔀 バリエ", isVariation || "-"),
+              makeInfoRowColored("⚠️ 危険物", isHazmat || "No", hazmatColor),
+              makeInfoRowColored("🏢 Amazon様", isAmazonSelling || "無", amazonSellColor)
+            ]
+          }
+        ]
+      },
+      "footer": {
+        "type": "box",
+        "layout": "horizontal",
+        "spacing": "sm",
+        "contents": [
+          {
+            "type": "button",
+            "action": { "type": "uri", "label": "📦Amazon", "uri": amazonLink },
+            "style": "primary",
+            "color": "#FF9900",
+            "height": "sm"
+          },
+          {
+            "type": "button",
+            "action": { "type": "uri", "label": "📈Keepa", "uri": keepaLink },
+            "style": "primary",
+            "color": "#1E88E5",
+            "height": "sm"
+          },
+          {
+            "type": "button",
+            "action": { "type": "uri", "label": "🔴メルカリ", "uri": mercariLink },
+            "style": "primary",
+            "color": "#E53935",
+            "height": "sm"
+          }
+        ]
+      }
+    }
+  };
+
+  // hero が undefined の場合は削除（画像なし対応）
+  if (!flexMessage.contents.hero) delete flexMessage.contents.hero;
+
+  const payload = {
+    "to": userId,
+    "messages": [flexMessage]
+  };
+
+  const options = {
+    "method": "post",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + accessToken
+    },
+    "payload": JSON.stringify(payload),
+    "muteHttpExceptions": true
+  };
+
+  try {
+    const res = UrlFetchApp.fetch('https://api.line.me/v2/bot/message/push', options);
+    if (res.getResponseCode() !== 200) {
+      console.warn(`LINE Flex送信エラー: ${res.getContentText()}`);
+    }
+  } catch(e) {
+    console.warn(`LINE Flex通信エラー: ${e}`);
+  }
+}
+
+// Flex Message 用ヘルパー関数
+function makeInfoRow(label, value) {
+  return {
+    "type": "box",
+    "layout": "horizontal",
+    "contents": [
+      { "type": "text", "text": label, "size": "xs", "color": "#888888", "flex": 4 },
+      { "type": "text", "text": String(value), "size": "xs", "weight": "bold", "align": "end", "flex": 3 }
+    ]
+  };
+}
+
+function makeInfoRowColored(label, value, color) {
+  return {
+    "type": "box",
+    "layout": "horizontal",
+    "contents": [
+      { "type": "text", "text": label, "size": "xs", "color": "#888888", "flex": 4 },
+      { "type": "text", "text": String(value), "size": "xs", "weight": "bold", "color": color, "align": "end", "flex": 3 }
+    ]
+  };
+}
+
+function setNotFound(sheet, row, colMap) { if (colMap.TITLE) sheet.getRange(row, colMap.TITLE).setValue("見つかりませんでした"); }
+function setError(sheet, row, colMap, message) { if (colMap.TITLE) sheet.getRange(row, colMap.TITLE).setValue(`[Error] ${message}`); }
 
 // ==========================================
 // 外部連携 (zaiko_tool / doPost)
@@ -391,39 +809,59 @@ function onOpen() {
 
 function syncAppSheetPurchases() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(TARGET_SHEET_NAME);
-  if (!sheet) return;
+  const sheet = ss.getActiveSheet(); // 汎用的にするためにアクティブシートを使う
+  if (!TARGET_SHEET_NAMES.includes(sheet.getName())) {
+    SpreadsheetApp.getUi().alert('エラー', '対象外のシートです。リサーチリストなどを開いた状態で実行してください。', SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+  
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return;
-  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
-  const colPurchased = headers.indexOf('仕入済') + 1;
-  const colTransferred = headers.indexOf('転送済フラグ') + 1;
-  if (colPurchased === 0 || colTransferred === 0) return;
-  const data = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+
+  const { colMap, lastCol } = getColMap(sheet);
+  const colPurchased = colMap.PURCHASED;
+  const colTransferred = colMap.TRANSFERRED;
+  
+  if (!colPurchased || !colTransferred) {
+    SpreadsheetApp.getUi().alert('エラー', '「仕入済」または「転送済フラグ」の列が見つかりません。', SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+
+  const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
   let count = 0;
+  
   for (let i = 0; i < data.length; i++) {
     if (data[i][colPurchased - 1] === true && data[i][colTransferred - 1] !== true) {
-      transferToPurchaseData(sheet, i + 2);
+      transferToPurchaseData(sheet, i + 2, colMap);
       sheet.getRange(i + 2, colTransferred).setValue(true);
       count++;
     }
   }
+  
   if (count > 0) SpreadsheetApp.getUi().alert('転送完了', `${count}件送信しました。`, SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
-function transferToPurchaseData(sourceSheet, row) {
+function transferToPurchaseData(sourceSheet, row, colMap) {
   try {
     const dataRow = sourceSheet.getRange(row, 1, 1, sourceSheet.getLastColumn()).getValues()[0];
     const appId = dataRow[0] || `ID-${new Date().getTime()}`;
-    const researchDate = dataRow[COL_RESEARCH_DT - 1] || Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm");
-    const janCode = dataRow[COL_JAN_INPUT - 1] || "";
-    const itemName = dataRow[COL_TITLE - 1] || "";
-    const unitPrice = dataRow[COL_PURCHASE - 1] || 0;
-    const defaultQty = 1;
-    const totalPrice = Number(unitPrice) * defaultQty;
+    
+    // 動的マップから値を取り出すヘルパー
+    const getVal = (key, defaultVal = "") => colMap[key] ? (dataRow[colMap[key] - 1] || defaultVal) : defaultVal;
+    const getNum = (key, defaultVal = 0) => colMap[key] ? (Number(dataRow[colMap[key] - 1]) || defaultVal) : defaultVal;
+
+    const researchDate = getVal('RESEARCH_DT', Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm"));
+    const janCode = getVal('JAN');
+    const itemName = getVal('TITLE');
+    const unitPrice = getNum('PURCHASE', 0);
+    
+    let defaultQty = getNum('QTY', 1);
+    if (defaultQty <= 0) defaultQty = 1;
+
+    const totalPrice = unitPrice * defaultQty;
     const shopName = "";
     const condition = "";
-    const imageUrl = dataRow[COL_IMAGE - 1] || "";
+    const imageUrl = getVal('IMAGE');
     const receiptImage = "";
 
     const zaikoSs = SpreadsheetApp.openById(ZAIKO_TOOL_SPREADSHEET_ID);
@@ -488,7 +926,7 @@ function doPost(e) {
     }
 
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheetName = json.sheet_name || "results";
+    const sheetName = json.sheet_name || "リサーチリスト"; // デフォルトをリサーチリストに
     let sheet = ss.getSheetByName(sheetName);
 
     const startCol = json.start_col || 1;
@@ -516,9 +954,11 @@ function doPost(e) {
       }
     }
 
-    if (sheetName === TARGET_SHEET_NAME) {
+    // 更新対象のシートであれば自動リサーチをトリガー
+    if (TARGET_SHEET_NAMES.includes(sheetName)) {
       try {
-        autoResearch(null);
+        // eオブジェクトのモックを作成し、該当のシートでautoResearchが実行されるようにする
+        autoResearch({ range: sheet.getRange(1, 1) });
       } catch (researchErr) {
         console.warn("doPost後の自動リサーチでエラー: " + researchErr.toString());
       }
