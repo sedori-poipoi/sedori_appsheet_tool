@@ -224,9 +224,10 @@ function recalculateRow(sheet, row, colMap) {
   // 🧮 数値のクリーンアップ（¥やカンマ、スペースを除去）
   const parseNum = (val) => {
     if (typeof val === 'number') return val;
-    if (!val) return 0;
-    const clean = String(val).replace(/[¥, ]/g, '');
-    return Number(clean) || 0;
+    if (!val || val === "圏外" || val === "データなし") return 0;
+    const clean = String(val).replace(/[¥, 位]/g, '').trim();
+    if (clean === "" || isNaN(Number(clean))) return 0;
+    return Number(clean);
   };
 
   const getNum = (colKey) => colMap[colKey] ? parseNum(values[colMap[colKey] - 1]) : 0;
@@ -358,8 +359,9 @@ function autoResearch(e) {
 
     if (!input || input === "") continue;
 
-    // 🔎 タイトルがない、または既存データに異常（nanが含まれる、紹介料が空など）がある場合はリサーチを実行
-    const isBroken = title.startsWith("[Error]") || title === "見つかりませんでした" || sizeWeight.includes("nan") || (title !== "" && refRate === "");
+    // 🔎 タイトルがない、または既存データに異常（エラー文字・nanが含まれる）がある場合はリサーチを実行
+    // ※ 紹介料率が空でもデフォルト15%で計算できるため「異常」とは見なさない（無限リサーチ防止）
+    const isBroken = title.startsWith("[Error]") || title === "見つかりませんでした" || sizeWeight.includes("nan");
     
     if (!title || title === "" || isBroken) {
       // 🔎 新規リサーチまたは不備データの修復
@@ -411,7 +413,26 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
       const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
       const json = JSON.parse(response.getContentText());
 
+      // 🔋 トークン残量チェック（20以下で緊急通知、0で処理停止）
+      const tokensLeft = json.tokensLeft;
+      const refillIn = json.refillIn || 0;
+      if (tokensLeft !== undefined && tokensLeft <= 20) {
+        const refillMinutes = Math.ceil(refillIn / 60000);
+        const warnMsg = `⚠️ Keepaトークン残量警告 ⚠️\n現在の残りトークンが「${tokensLeft}」になりました。\n約${refillMinutes}分後に回復予定です。\n\n少しリサーチの手を休めて、トークンの回復をお待ちください☕️`;
+        sendLineNotification(warnMsg);
+        console.warn(`🔋 トークン残量警告: 残り${tokensLeft}トークン / 約${refillMinutes}分後に回復`);
+        if (tokensLeft <= 0) return false; // 完全枯渇時は全処理を停止
+      }
+
+      // 🛡️ 既存データ保護: ASINが入っている行はAPIエラーでも絶対上書きしない
+      const existingAsin = colMap.ASIN ? sheet.getRange(row, colMap.ASIN).getValue() : '';
+      const hasExistingData = existingAsin && String(existingAsin).trim() !== '';
+
       if (json.error || !json.products || json.products.length === 0) {
+        if (hasExistingData) {
+          console.warn(`🛡️ データ保護: 行${row}はASIN(${existingAsin})取得済みのため、エラーによる上書きをスキップしました。`);
+          return true;
+        }
         if (json.error) setError(sheet, row, colMap, `API Error: ${json.error.message}`);
         else setNotFound(sheet, row, colMap);
         return true;
@@ -432,7 +453,8 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
     const imageUrl = imageCsv ? `https://m.media-amazon.com/images/I/${imageCsv.split(",")[0]}` : "";
     const stats = product.stats || {};
     const current = stats.current || [];
-    const rank = current[3] || "";
+    const rawRank = current[3];
+    let rank = (rawRank === -1 || rawRank === undefined || rawRank === null) ? "圏外" : rawRank;
     let newPrice = (current[1] > 0 ? current[1] : (current[0] > 0 ? current[0] : ""));
     
     // カート価格 (buyBoxPrice や current[18] が -1 や -2 の場合は除外する)
@@ -548,8 +570,8 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
 
     if (matches.length > 0 && ss) markWantedListAsArrested(ss, matches);
 
-    // 🔔 LINE リッチ通知（利益300円以上 or 手配書マッチ時）
-    const MIN_PROFIT_FOR_ALERT = 300;
+    // 🔔 LINE リッチ通知（利益100円以上 or 手配書マッチ時）
+    const MIN_PROFIT_FOR_ALERT = 100;
     const numBreakEven = Number(breakEven) || 0;
     const numPurchase = Number(existingPurchasePrice) || 0;
     const profit = numPurchase > 0 ? (numBreakEven - numPurchase) : numBreakEven;
@@ -569,7 +591,16 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
 
     console.log(`🌸 API リサーチ完了: ${title} -> 行: ${row} に書き込みました`);
     return true;
-  } catch (e) { setError(sheet, row, colMap, e.toString()); return true; }
+  } catch (e) {
+    // 🛡️ 既存データ保護: ASINが入っている行は例外エラーでも絶対上書きしない
+    const existingAsinOnCatch = colMap.ASIN ? sheet.getRange(row, colMap.ASIN).getValue() : '';
+    if (!existingAsinOnCatch || String(existingAsinOnCatch).trim() === '') {
+      setError(sheet, row, colMap, e.toString());
+    } else {
+      console.warn(`🛡️ データ保護(catch): 行${row}はASIN取得済みのため、例外エラーによる上書きをスキップしました。`);
+    }
+    return true;
+  }
 }
 
 // ==========================================
@@ -804,6 +835,8 @@ const ZAIKO_SHEET_NAME = '仕入れデータ';
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('📱 AppSheet連携')
     .addItem('📥 AppSheetの「仕入済」をzaiko_toolへ送信', 'syncAppSheetPurchases')
+    .addSeparator()
+    .addItem('🔄 未取得データを一括リサーチ (取得漏れの修復)', 'retryMissingResearch')
     .addToUi();
 }
 
@@ -968,5 +1001,50 @@ function doPost(e) {
 
   } catch (error) {
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: error.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+/**
+ * JANはあるがタイトル等の情報が取得できていない行を一括リサーチする (メニュー用)
+ */
+function retryMissingResearch() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  
+  if (!TARGET_SHEET_NAMES.includes(sheet.getName())) {
+    SpreadsheetApp.getUi().alert('対象外のシートです。リサーチリストなどを開いた状態で実行してください。');
+    return;
+  }
+  
+  const { colMap } = getColMap(sheet);
+  if (!colMap.JAN || !colMap.TITLE) {
+    SpreadsheetApp.getUi().alert('JANコードまたは商品名の列が見つかりません。');
+    return;
+  }
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  
+  const janValues = sheet.getRange(2, colMap.JAN, lastRow - 1, 1).getValues();
+  const titleValues = sheet.getRange(2, colMap.TITLE, lastRow - 1, 1).getValues();
+  
+  let count = 0;
+  for (let i = 0; i < janValues.length; i++) {
+    const jan = String(janValues[i][0]).trim();
+    const title = String(titleValues[i][0]).trim();
+    
+    // JANがある & 商品名が空 or エラー の場合に再取得
+    if (jan !== "" && (title === "" || title.startsWith("[Error") || title === "見つかりませんでした")) {
+      count++;
+      // autoResearch(e) を各行に対して呼び出す。e.rangeを偽装してターゲット行を指定
+      autoResearch({ range: sheet.getRange(i + 2, colMap.JAN) });
+      Utilities.sleep(500); // 連続通信による負荷抑制
+    }
+  }
+  
+  if (count > 0) {
+    SpreadsheetApp.getUi().alert(`✅ 完了: ${count}件のデータを修復・取得しました。`);
+  } else {
+    SpreadsheetApp.getUi().alert('💡 情報: すべてのデータは取得済みです。');
   }
 }
