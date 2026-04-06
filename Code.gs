@@ -9,8 +9,6 @@
 // 設定エリア
 // ==========================================
 
-const KEEPA_API_KEY = 'psr7fkj9soadqmmqptf70e34bs6t317ujjptvul3vfi5i5hvcmrst4p8hf22aqmb';
-
 // 処理対象となるシート名のリスト（これ以外のシートで編集されても発火しない）
 const TARGET_SHEET_NAMES = [
   "リサーチリスト", 
@@ -26,11 +24,21 @@ const TARGET_SHEET_NAMES = [
 function getApiTokens() {
   const props = PropertiesService.getScriptProperties();
   return {
+    KEEPA_API_KEY: props.getProperty('KEEPA_API_KEY') || '',
+    POST_API_KEY: props.getProperty('POST_API_KEY') || '',
     LINE_ACCESS_TOKEN: props.getProperty('LINE_ACCESS_TOKEN') || '',
     LINE_USER_ID: props.getProperty('LINE_USER_ID') || '',
     KV_REST_API_URL: props.getProperty('KV_REST_API_URL') || '',
     KV_REST_API_TOKEN: props.getProperty('KV_REST_API_TOKEN') || ''
   };
+}
+
+function getRequiredApiToken(keyName) {
+  const value = getApiTokens()[keyName];
+  if (!value) {
+    throw new Error(`Script Properties に ${keyName} が未設定です`);
+  }
+  return value;
 }
 
 const WANTED_LIST_TARGETS = [
@@ -403,13 +411,14 @@ function autoResearch(e) {
 
 function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
   try {
+    const keepaApiKey = getRequiredApiToken('KEEPA_API_KEY');
     let product = getFromKvCache(barcode);
     let usedCache = !!product;
 
     if (!usedCache) {
       const inputType = detectInputType(barcode);
       const paramKey = (inputType === 'asin') ? 'asin' : 'code';
-      const url = `https://api.keepa.com/product?key=${KEEPA_API_KEY}&domain=5&type=product&${paramKey}=${barcode}&stats=1`;
+      const url = `https://api.keepa.com/product?key=${keepaApiKey}&domain=5&type=product&${paramKey}=${barcode}&stats=1`;
       const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
       const json = JSON.parse(response.getContentText());
 
@@ -949,12 +958,11 @@ function transferToPurchaseData(sourceSheet, row, colMap) {
   } catch(e) { console.error("転送エラー: " + e.toString()); }
 }
 
-const POST_API_KEY = "muqzyz-tonhyz-Disry7";
-
 function doPost(e) {
   try {
     const json = JSON.parse(e.postData.contents);
-    if (json.api_key !== POST_API_KEY) {
+    const postApiKey = getRequiredApiToken('POST_API_KEY');
+    if (json.api_key !== postApiKey) {
       return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Invalid API Key" })).setMimeType(ContentService.MimeType.JSON);
     }
 
