@@ -67,6 +67,9 @@ const COL_ALIASES = {
   FBA_LOWEST: ['FBA最安値'],
   PURCHASE: ['仕入価格', '仕入価格(入力用)'],
   PROFIT: ['粗利益'],
+  BREAK_EVEN: ['損益分岐(仕入上限)', '損益分岐点'],
+  PROFIT_RATE: ['利益率'],
+  ROI: ['ROI'],
   LIST_PRICE: ['定価/通常価格', '定価'],
   PREMIUM_JUDGE: ['プレ値判定', 'プレ値'],
   JUDGMENT: ['仕入判定', '判定(自動計算)', '判定'],
@@ -204,15 +207,22 @@ function onEdit(e) {
 
   if (colPurchased && editedCol === colPurchased) {
     const isPurchased = sheet.getRange(row, colPurchased).getValue() === true;
-    const isTransferred = colTransferred ? sheet.getRange(row, colTransferred).getValue() === true : false;
+    const isTransferred = colTransferred ? sheet.getRange(row, colTransferred).getValue() : false;
 
     if (isPurchased && !isTransferred) {
       transferToPurchaseData(sheet, row, colMap);
       if (colTransferred) sheet.getRange(row, colTransferred).setValue(true);
     }
   } else if (editedCol === colMap.PURCHASE || editedCol === colMap.QTY || editedCol === colMap.BUYBOX || editedCol === colMap.FBA_FEE) {
-    // 💡 仕入価格、個数、またはカート価格等が変更された場合は再計算
+    // 💡 価格や個数が変更された場合の処理
     recalculateRow(sheet, row, colMap);
+    
+    // 🛡️ もし商品名が空（＝過去に取得失敗している）なら、ついでに再リサーチを試みる
+    const title = colMap.TITLE ? sheet.getRange(row, colMap.TITLE).getValue() : "exists";
+    if (!title || title === "" || String(title).startsWith("[Error]")) {
+      console.log(`🔎 行:${row} の商品名が空のため、価格編集をトリガーに再取得を試みます...`);
+      autoResearch(e);
+    }
   } else {
     autoResearch(e);
   }
@@ -321,87 +331,59 @@ function testRun() {
 // ==========================================
 
 function autoResearch(e) {
-  console.log("🌸 autoResearch 開始...");
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet;
+  let targetRow = null;
+
   if (e && e.range) {
-      sheet = e.range.getSheet(); // トリガー実行シートを優先
+    sheet = e.range.getSheet();
+    targetRow = e.range.getRow();
   } else {
-      sheet = ss.getActiveSheet(); // 手動実行時はアクティブシート
+    sheet = ss.getActiveSheet();
   }
-  
+
   if (!TARGET_SHEET_NAMES.includes(sheet.getName())) {
-      sheet = ss.getSheetByName("リサーチリスト"); // デフォルトフォールバック
-      if (!sheet) return;
+    sheet = ss.getSheetByName("リサーチリスト") || sheet;
+    if (!TARGET_SHEET_NAMES.includes(sheet.getName())) return;
   }
 
   const { colMap, lastCol } = getColMap(sheet);
-  if (!colMap.JAN) return; // JAN列がないと計算不可
+  if (!colMap.JAN) return;
 
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return;
 
+  // 🚀 スキャン範囲の決定 (全件スキャン or ターゲット行のみ)
+  // eが存在する場合は基本ターゲット行のみ、eがない場合は未取得全件
+  const startIdx = (targetRow && targetRow > 1) ? targetRow - 1 : 1;
+  const endIdx = (targetRow && targetRow > 1) ? targetRow - 1 : lastRow - 1;
+
   const fullRange = sheet.getRange(1, 1, lastRow, lastCol);
   const allValues = fullRange.getValues();
 
-  const cacheMap = new Map();
-  // 1. すでにタイトルが入っている行のデータをローカルキャッシュに蓄積
-  for (let r = 1; r < allValues.length; r++) {
-    const input = String(allValues[r][colMap.JAN - 1]).trim();
-    const title = colMap.TITLE ? String(allValues[r][colMap.TITLE - 1]) : "";
-    if (input && input !== "" && title && title !== "" && !title.startsWith("[Error") && title !== "見つかりませんでした") {
-      cacheMap.set(input, allValues[r]);
-    }
-  }
-
-  // グローバル変数に依存せず、1回だけ手配書リストを取得する
+  // 1回だけ手配書リストを取得
   const wantedMap = getWantedJanMap();
 
   // 2. データの取得と再計算
-  for (let i = 1; i < allValues.length; i++) {
+  for (let i = startIdx; i <= endIdx; i++) {
     const currentRow = i + 1;
     const input = String(allValues[i][colMap.JAN - 1]).trim();
     const title = colMap.TITLE ? String(allValues[i][colMap.TITLE - 1]) : "";
     const sizeWeight = colMap.SIZE_WEIGHT ? String(allValues[i][colMap.SIZE_WEIGHT - 1]) : "";
-    const refRate = colMap.REF_RATE ? allValues[i][colMap.REF_RATE - 1] : "";
 
     if (!input || input === "") continue;
 
-    // 🔎 タイトルがない、または既存データに異常（エラー文字・nanが含まれる）がある場合はリサーチを実行
-    // ※ 紹介料率が空でもデフォルト15%で計算できるため「異常」とは見なさない（無限リサーチ防止）
-    const isBroken = title.startsWith("[Error]") || title === "見つかりませんでした" || sizeWeight.includes("nan");
-    
-    if (!title || title === "" || isBroken) {
-      // 🔎 新規リサーチまたは不備データの修復
-      if (cacheMap.has(input) && !isBroken) {
-        console.log(`🌸 キャッシュヒット: ${input} -> 行: ${currentRow} に書き込みます`);
-        const cachedData = cacheMap.get(input);
-        const targetValues = [...allValues[i]]; // 現在の行
-        
-        for (const [key, colIdx] of Object.entries(colMap)) {
-            // ユーザー入力済みの情報や、すでに正しく入っている可能性のある列を保護
-            if (['JAN', 'PURCHASE', 'QTY', 'PURCHASED', 'TRANSFERRED'].includes(key)) continue;
-            targetValues[colIdx - 1] = cachedData[colIdx - 1];
-        }
-        
-        sheet.getRange(currentRow, 1, 1, lastCol).setValues([targetValues]);
-        SpreadsheetApp.flush();
-        const matches = wantedMap.get(input) || [];
-        if (matches.length > 0) markWantedListAsArrested(ss, matches);
-        
-        recalculateRow(sheet, currentRow, colMap);
-      } else {
-        const canContinue = fetchProductData(input, currentRow, sheet, ss, wantedMap, colMap);
-        if (canContinue === false) break;
-        Utilities.sleep(1000); // 連続通信を避ける
-      }
+    const isBroken = title === "" || title.startsWith("[Error]") || title === "見つかりませんでした" || sizeWeight.includes("nan");
+
+    if (isBroken) {
+      // 🔎 新規または欠損データの取得
+      const canContinue = fetchProductData(input, currentRow, sheet, ss, wantedMap, colMap);
+      if (canContinue === false) break;
+      Utilities.sleep(500); 
     } else {
-      // 🔄 既存行の再計算（直近の100件程度に限定して高速化）
-      if (i > allValues.length - 150) {
-        recalculateRow(sheet, currentRow, colMap);
-      }
+      // 🔄 既存行の再計算
+      recalculateRow(sheet, currentRow, colMap);
     }
-    Utilities.sleep(100); // 負荷軽減
   }
 }
 
@@ -418,28 +400,42 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
     if (!usedCache) {
       const inputType = detectInputType(barcode);
       const paramKey = (inputType === 'asin') ? 'asin' : 'code';
-      const url = `https://api.keepa.com/product?key=${keepaApiKey}&domain=5&type=product&${paramKey}=${barcode}&stats=1`;
-      const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-      const json = JSON.parse(response.getContentText());
+      let url = `https://api.keepa.com/product?key=${keepaApiKey}&domain=5&type=product&${paramKey}=${barcode}&stats=1`;
+      let response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      let json = JSON.parse(response.getContentText());
+
+      // 🛒 JANで失敗した場合にASINでリトライするロジックを追加
+      if (paramKey === 'code' && (json.error || !json.products || json.products.length === 0)) {
+        const existingAsin = colMap.ASIN ? sheet.getRange(row, colMap.ASIN).getValue() : '';
+        if (existingAsin && String(existingAsin).trim() !== '') {
+          console.log(`🔎 JANでの取得に失敗したため、ASIN(${existingAsin})でリトライします...`);
+          url = `https://api.keepa.com/product?key=${keepaApiKey}&domain=5&type=product&asin=${existingAsin}&stats=1`;
+          response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+          json = JSON.parse(response.getContentText());
+        }
+      }
 
       // 🔋 トークン残量チェック（20以下で緊急通知、0で処理停止）
       const tokensLeft = json.tokensLeft;
       const refillIn = json.refillIn || 0;
       if (tokensLeft !== undefined && tokensLeft <= 20) {
         const refillMinutes = Math.ceil(refillIn / 60000);
-        const warnMsg = `⚠️ Keepaトークン残量警告 ⚠️\n現在の残りトークンが「${tokensLeft}」になりました。\n約${refillMinutes}分後に回復予定です。\n\n少しリサーチの手を休めて、トークンの回復をお待ちください☕️`;
+        const warnMsg = `⚠️ Keepaトークン残量警告 ⚠️\n現在の残りトークンが「${tokensLeft}」になりました。\n約${refillMinutes}分後に回復予定です。`;
         sendLineNotification(warnMsg);
         console.warn(`🔋 トークン残量警告: 残り${tokensLeft}トークン / 約${refillMinutes}分後に回復`);
-        if (tokensLeft <= 0) return false; // 完全枯渇時は全処理を停止
+        if (tokensLeft <= 0) {
+          console.error("🚫 KEEPトークンが枯渇したため、処理を中断します。");
+          return false;
+        }
       }
 
       // 🛡️ 既存データ保護: ASINが入っている行はAPIエラーでも絶対上書きしない
-      const existingAsin = colMap.ASIN ? sheet.getRange(row, colMap.ASIN).getValue() : '';
-      const hasExistingData = existingAsin && String(existingAsin).trim() !== '';
+      const existingAsinFinal = colMap.ASIN ? sheet.getRange(row, colMap.ASIN).getValue() : '';
+      const hasExistingData = existingAsinFinal && String(existingAsinFinal).trim() !== '';
 
       if (json.error || !json.products || json.products.length === 0) {
         if (hasExistingData) {
-          console.warn(`🛡️ データ保護: 行${row}はASIN(${existingAsin})取得済みのため、エラーによる上書きをスキップしました。`);
+          console.warn(`🛡️ データ保護: 行${row}はASIN取得済みのため、エラーによる上書きをスキップしました。`);
           return true;
         }
         if (json.error) setError(sheet, row, colMap, `API Error: ${json.error.message}`);
@@ -527,7 +523,8 @@ function fetchProductData(barcode, row, sheet, ss, wantedMap, colMap) {
     const poiLink = `http://localhost:3000/?q=${asin}`;
     const now = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy/MM/dd HH:mm");
 
-    const matches = wantedMap.get(String(barcode).trim()) || [];
+    // 現在のシートと同じシート由来のマッチは自己検知なので除外
+    const matches = (wantedMap.get(String(barcode).trim()) || []).filter(m => m.sheetName !== sheet.getName());
     const judgmentFlag = getJudgmentFlagString(matches);
     
     // 現在の行データを取得し、必要な列だけを安全に上書き
@@ -901,17 +898,25 @@ function transferToPurchaseData(sourceSheet, row, colMap) {
     if (defaultQty <= 0) defaultQty = 1;
 
     const totalPrice = unitPrice * defaultQty;
-    const shopName = "";
+    const shopName = getVal('SHOP', '');
     const condition = "";
     const imageUrl = getVal('IMAGE');
     const receiptImage = "";
 
+    // ★ 新規追加: ASIN, SKU, 損益分岐点をリサーチリストから取得
+    const asin = getVal('ASIN');
+    const sku = getVal('SKU');
+    const breakEven = getNum('BREAK_EVEN', 0);
+
     const zaikoSs = SpreadsheetApp.openById(ZAIKO_TOOL_SPREADSHEET_ID);
     const targetSheet = zaikoSs.getSheetByName(ZAIKO_SHEET_NAME);
     
+    // ★ 仕入れデータシートへの書き込み (14列: A-N)
+    // 既存11列 + L:ASIN, M:SKU, N:損益分岐点
     if (targetSheet) {
       targetSheet.appendRow([
-        appId, researchDate, janCode, itemName, unitPrice, defaultQty, totalPrice, shopName, condition, imageUrl, receiptImage
+        appId, researchDate, janCode, itemName, unitPrice, defaultQty, totalPrice, shopName, condition, imageUrl, receiptImage,
+        asin, sku, breakEven
       ]);
     }
 
@@ -924,6 +929,8 @@ function transferToPurchaseData(sourceSheet, row, colMap) {
     const strAppId = String(appId);
     const shortId = strAppId.length > 4 ? strAppId.slice(-4) : strAppId.padStart(4, '0');
 
+    // ★ EC注文履歴への書き込み (12列: A-L)
+    // 既存10列 + K:ASIN, L:SKU
     const ecHistorySheet = zaikoSs.getSheetByName('EC注文履歴');
     if (ecHistorySheet) {
       const lastRow = ecHistorySheet.getLastRow();
@@ -933,26 +940,44 @@ function transferToPurchaseData(sourceSheet, row, colMap) {
         if (ids.includes(appId)) isDuplicateEC = true;
       }
       if (!isDuplicateEC) {
-        ecHistorySheet.appendRow([dateStr, shopName, itemName, unitPrice, defaultQty, totalAmountStr, appId, now, appId]);
+        ecHistorySheet.appendRow([
+          dateStr, shopName, itemName, unitPrice, defaultQty, totalAmountStr, appId, now, appId, imageUrl,
+          asin, sku
+        ]);
       }
     }
 
+    // ★ 在庫管理マスタへの書き込み (18列: A-R)
+    // カラムレイアウト：
+    // A:管理ID, B:商品名, C:仕入日, D:仕入先, E:仕入額(単価), F:ステータス,
+    // G:出品日, H:回転日数, I:販売日, J:売上額, K:手数料, L:送料, M:純利益,
+    // N:元注文番号, O:商品画像, P:SKU, Q:ASIN, R:損益分岐点
     const invMasterSheet = zaikoSs.getSheetByName('在庫管理マスタ');
     if (invMasterSheet) {
       const lastRow = invMasterSheet.getLastRow();
       let isDuplicateInv = false;
       if (lastRow > 1) {
-        const ids = invMasterSheet.getRange(2, 12, lastRow - 1, 1).getValues().flat();
-        if (ids.includes(appId)) isDuplicateInv = true;
+        // ★ 修正: N列(14列目)で重複チェック（旧版は12列目を見ていたバグを修正）
+        // 後方互換性のため、L列(12)とN列(14)の両方をチェック
+        const idsN = invMasterSheet.getRange(2, 14, lastRow - 1, 1).getValues().flat();
+        const idsL = invMasterSheet.getRange(2, 12, lastRow - 1, 1).getValues().flat();
+        if (idsN.includes(appId) || idsL.includes(appId)) isDuplicateInv = true;
       }
       if (!isDuplicateInv) {
         const newRows = [];
         const cleanDateStr = isValidDate ? Utilities.formatDate(dateObj, 'Asia/Tokyo', 'yyyy-MM-dd') : Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
         for (let i = 1; i <= defaultQty; i++) {
           const invId = `INV-${dateIdPart}-${shortId}-${i}`;
-          newRows.push([invId, itemName, cleanDateStr, shopName, unitPrice, "出品待ち", "", "", "", "", "", appId]);
+          // ★ 18列フォーマット: SalesData.jsと統一
+          newRows.push([
+            invId, itemName, cleanDateStr, shopName, unitPrice,
+            "出品待ち", "", "", "", "", "", "", "",
+            appId, imageUrl, sku, asin, breakEven
+          ]);
         }
-        if (newRows.length > 0) invMasterSheet.getRange(invMasterSheet.getLastRow() + 1, 1, newRows.length, 12).setValues(newRows);
+        if (newRows.length > 0) {
+          invMasterSheet.getRange(invMasterSheet.getLastRow() + 1, 1, newRows.length, 18).setValues(newRows);
+        }
       }
     }
   } catch(e) { console.error("転送エラー: " + e.toString()); }
@@ -997,11 +1022,17 @@ function doPost(e) {
 
     // 更新対象のシートであれば自動リサーチをトリガー
     if (TARGET_SHEET_NAMES.includes(sheetName)) {
-      try {
-        // eオブジェクトのモックを作成し、該当のシートでautoResearchが実行されるようにする
-        autoResearch({ range: sheet.getRange(1, 1) });
-      } catch (researchErr) {
-        console.warn("doPost後の自動リサーチでエラー: " + researchErr.toString());
+      if (json.skip_research === true || json.skip_research === "true") {
+        console.log("python側からのフラグにより自動リサーチをスキップしました");
+      } else if (Array.isArray(rows) && rows.length > 5) {
+        console.warn("大量データ追加のため、同期的な自動リサーチをスキップします。");
+      } else {
+        try {
+          // eオブジェクトのモックを作成し、該当のシートでautoResearchが実行されるようにする
+          autoResearch({ range: sheet.getRange(1, 1) });
+        } catch (researchErr) {
+          console.warn("doPost後の自動リサーチでエラー: " + researchErr.toString());
+        }
       }
     }
 
@@ -1020,39 +1051,39 @@ function retryMissingResearch() {
   const sheet = ss.getActiveSheet();
   
   if (!TARGET_SHEET_NAMES.includes(sheet.getName())) {
-    SpreadsheetApp.getUi().alert('対象外のシートです。リサーチリストなどを開いた状態で実行してください。');
+    SpreadsheetApp.getUi().alert('対象外のシートです。');
     return;
   }
   
   const { colMap } = getColMap(sheet);
-  if (!colMap.JAN || !colMap.TITLE) {
-    SpreadsheetApp.getUi().alert('JANコードまたは商品名の列が見つかりません。');
-    return;
-  }
+  if (!colMap.JAN || !colMap.TITLE) return;
   
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return;
   
-  const janValues = sheet.getRange(2, colMap.JAN, lastRow - 1, 1).getValues();
-  const titleValues = sheet.getRange(2, colMap.TITLE, lastRow - 1, 1).getValues();
-  
+  const allValues = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+  const wantedMap = getWantedJanMap(); // 1回だけ取得
+
   let count = 0;
-  for (let i = 0; i < janValues.length; i++) {
-    const jan = String(janValues[i][0]).trim();
-    const title = String(titleValues[i][0]).trim();
-    
-    // JANがある & 商品名が空 or エラー の場合に再取得
-    if (jan !== "" && (title === "" || title.startsWith("[Error") || title === "見つかりませんでした")) {
+  for (let i = 1; i < allValues.length; i++) {
+    const jan = String(allValues[i][colMap.JAN - 1]).trim();
+    const title = String(allValues[i][colMap.TITLE - 1]).trim();
+    const isBroken = title === "" || title.startsWith("[Error") || title === "見つかりませんでした";
+
+    if (jan !== "" && isBroken) {
       count++;
-      // autoResearch(e) を各行に対して呼び出す。e.rangeを偽装してターゲット行を指定
-      autoResearch({ range: sheet.getRange(i + 2, colMap.JAN) });
-      Utilities.sleep(500); // 連続通信による負荷抑制
+      const canContinue = fetchProductData(jan, i + 1, sheet, ss, wantedMap, colMap);
+      if (canContinue === false) {
+        SpreadsheetApp.getUi().alert('APIトークンが不足したため中断しました。');
+        break;
+      }
+      Utilities.sleep(500); 
     }
   }
   
   if (count > 0) {
-    SpreadsheetApp.getUi().alert(`✅ 完了: ${count}件のデータを修復・取得しました。`);
+    SpreadsheetApp.getUi().alert(`✅ 完了: ${count}件のデータを取得・修復しました。`);
   } else {
-    SpreadsheetApp.getUi().alert('💡 情報: すべてのデータは取得済みです。');
+    SpreadsheetApp.getUi().alert('💡 すべてのデータは取得済みです。');
   }
 }

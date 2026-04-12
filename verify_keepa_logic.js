@@ -1,3 +1,4 @@
+/*
 const axios = require('axios');
 
 // ユーザー提供のAPIキー（本来は環境変数管理すべきだが検証用のためハードコード）
@@ -57,3 +58,4 @@ async function verifyKeepaLogic() {
 }
 
 verifyKeepaLogic();
+*/
